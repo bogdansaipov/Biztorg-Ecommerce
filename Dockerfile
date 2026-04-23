@@ -1,21 +1,19 @@
 FROM node:lts-alpine
 
-ENV HOST=0.0.0.0
-ENV PORT=3001
-
 WORKDIR /src
-RUN addgroup -S app && adduser -S -G app app
 
 COPY package.json pnpm-lock.yaml* ./
 
-RUN npm install -g pnpm \
-    && pnpm install --frozen-lockfile --prefer-offline
+RUN corepack enable \
+  && corepack prepare pnpm@latest --activate \
+  && pnpm install --frozen-lockfile
 
 COPY . .
 
-COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
+RUN chmod +x docker-entrypoint.sh
+
+RUN pnpm run build
 
 EXPOSE 3001
 
-CMD ["./entrypoint.sh"]
+CMD ["sh", "./docker-entrypoint.sh"]

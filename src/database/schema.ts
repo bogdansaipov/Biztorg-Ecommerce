@@ -1,5 +1,4 @@
-import { relations } from 'drizzle-orm';
-import { primaryKey } from 'drizzle-orm/pg-core';
+import { relations, sql } from 'drizzle-orm';
 import { doublePrecision } from 'drizzle-orm/pg-core';
 import { jsonb } from 'drizzle-orm/pg-core';
 import { numeric } from 'drizzle-orm/pg-core';
@@ -16,8 +15,9 @@ import {
   decimal,
   uuid,
   varchar,
+  check,
 } from 'drizzle-orm/pg-core';
-import { UserRoleEnum, CurrencyEnum, ProductType, UserSchema, PriorityType } from 'src/utils/zod.schema';
+import { UserRoleEnum, CurrencyEnum, ProductType, UserSchema, PriorityType, ConversationTypeEnum, ParticipantRoleEnum, MessageTypeEnum, NotificationTypeEnum, ShopMemberRoleEnum } from 'src/utils/zod.schema';
 
 const tsvector = customType<{ data: string }>({
   dataType() {
@@ -46,6 +46,38 @@ export const DrizzlePriorityEnum = pgEnum('priority_type', [
   PriorityType.HIGH,
   PriorityType.MEDIUM,
   PriorityType.LOW
+]);
+
+export const DrizzleConversationTypeEnum = pgEnum('conversation_type', [
+   ConversationTypeEnum.DIRECT, // 1-on-1 DM
+    ConversationTypeEnum.GROUP, // private group (invite only)
+    ConversationTypeEnum.PUBLIC // public room (anyone can join)
+]);
+
+export const DrizzleParticipantRoleEnum = pgEnum('participant_role', [
+  ParticipantRoleEnum.OWNER,    // creator, full control
+  ParticipantRoleEnum.ADMIN,    // can moderate
+  ParticipantRoleEnum.MEMBER   // regular participant
+]);
+
+export const DrizzleMessageTypeEnum = pgEnum('message_type', [
+  MessageTypeEnum.TEXT,
+  MessageTypeEnum.IMAGE,
+  MessageTypeEnum.SYSTEM,  // 'SYSTEM' = "Alice joined the chat"
+]);
+
+export const DrizzleNotificationTypeEnum = pgEnum('notification_type', [
+  NotificationTypeEnum.NEW_MESSAGE,
+  NotificationTypeEnum.NEW_PRODUCT_POSTED, // new product posted from shop owner subscribed to
+  NotificationTypeEnum.NEW_FOLLOWER,
+  NotificationTypeEnum.PRODUCT_APPROVED,
+  NotificationTypeEnum.PRODUCT_REJECTED,
+]);
+
+export const DrizzleShopMemberRoleEnum = pgEnum('shop_member_role', [
+  ShopMemberRoleEnum.OWNER,
+  ShopMemberRoleEnum.ADMIN,
+  ShopMemberRoleEnum.EDITOR,
 ]);
 
 // schemas
@@ -79,8 +111,10 @@ export const profilesSchema = pgTable('profiles', {
     facebookId: text('facebook_id'),
     fcmToken: text('fcm_token'),
     regionId: uuid('region_id').references(() => regionsSchema.id),
-   ...baseSchema
-})
+   ...baseSchema,
+}, (table) => [
+  index("profiles_user_idx").on(table.userId),
+]);
 
 export const tempPhoneCredentialsSchema = pgTable('temp_phone_credentials', {
   phone: varchar('phone', { length: 20 }).unique().notNull(),
@@ -90,49 +124,85 @@ export const tempPhoneCredentialsSchema = pgTable('temp_phone_credentials', {
 })
 
 export const conversationsSchema = pgTable('conversations', {
-  userOneId: uuid('user_one_id').notNull().references(() => usersSchema.id, {
-        onDelete: 'cascade',
-    }),
-  userTwoId: uuid('user_two_id').notNull().references(() => usersSchema.id, {
-        onDelete: 'cascade',
-    }),
-  ...baseSchema
-})
+  type: DrizzleConversationTypeEnum('type').default(ConversationTypeEnum.DIRECT).notNull(),
+  name: varchar('name', { length: 255 }),          // for group/public only
+  description: text('description'),                // for group/public only
+  imageUrl: varchar('image_url', { length: 255 }), // chat avatar
+  createdBy: uuid('created_by').references(() => usersSchema.id, { onDelete: 'set null' }),
+  lastMessageAt: timestamp('last_message_at', { withTimezone: true }),
+  ...baseSchema,
+}, (table) => [
+  index('conversations_type_idx').on(table.type),
+  index('conversations_last_message_idx').on(table.lastMessageAt),
+]);
+
+export const conversationParticipantsSchema = pgTable('conversation_participants', {
+  conversationId: uuid('conversation_id').notNull()
+    .references(() => conversationsSchema.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id').notNull()
+    .references(() => usersSchema.id, { onDelete: 'cascade' }),
+  role: DrizzleParticipantRoleEnum('role').notNull().default(ParticipantRoleEnum.MEMBER),
+  joinedAt: timestamp('joined_at', { withTimezone: true }).defaultNow().notNull(),
+  leftAt: timestamp('left_at', { withTimezone: true }),
+  lastReadMessageId: uuid('last_read_message_id'),
+  isMuted: boolean('is_muted').default(false).notNull(),
+  ...baseSchema,
+}, (table) => [
+  uniqueIndex('conversation_participants_unique').on(table.conversationId, table.userId),
+  index('conversation_participants_user_idx').on(table.userId),
+  index('conversation_participants_convo_idx').on(table.conversationId),
+]);
 
 export const messagesSchema = pgTable('messages', {
-  conversationId: uuid('conversation_id').notNull().references(() => conversationsSchema.id, {
-        onDelete: 'cascade',
-    }),
-  senderId: uuid('sender_id').notNull().references(() => usersSchema.id, {
-    onDelete: 'cascade',
-  }),
-  message: text("message"),
+  conversationId: uuid('conversation_id').notNull()
+    .references(() => conversationsSchema.id, { onDelete: 'cascade' }),
+  senderId: uuid('sender_id')
+    .references(() => usersSchema.id, { onDelete: 'set null' }),
+  type: DrizzleMessageTypeEnum('type').notNull().default(MessageTypeEnum.TEXT),
+  content: text('content'),
   imageUrl: varchar('image_url', { length: 255 }),
-  readAt: timestamp('read_at', { mode: 'date', withTimezone: true }),
-  ...baseSchema
-})
+  replyToMessageId: uuid('reply_to_message_id'),
+  editedAt: timestamp('edited_at', { withTimezone: true }),
+  ...baseSchema,
+}, (table) => [
+  index('messages_conversation_created_idx').on(table.conversationId, table.createdAt),
+  index('messages_sender_idx').on(table.senderId),
+  check('messages_has_content', sql`
+  (${table.type} = 'SYSTEM') OR
+  (${table.content} IS NOT NULL OR ${table.imageUrl} IS NOT NULL)
+`),
+]);
 
-export const notificationsSchema = pgTable("notifications", {
-  receiverId: uuid("receiver_id")
-    .references(() => usersSchema.id, { onDelete: "cascade" }),
-  senderId: uuid("sender_id")
-    .references(() => usersSchema.id, { onDelete: "set null" }),
-  type: varchar("type").notNull(),
-  content: text("content").notNull(),
-  hasBeenSeen: boolean("has_been_seen").default(false).notNull(),
-  isGlobal: boolean("is_global").default(false).notNull(),
-  referenceId: varchar("reference_id"),
-  priority: DrizzlePriorityEnum("priority").default(PriorityType.MEDIUM).notNull(),
-  expiresAt: timestamp("expires_at"),
-  metadata: jsonb("metadata"),
-  date: timestamp("date").defaultNow().notNull(),
-  ...baseSchema
-});
+export const notificationsSchema = pgTable('notifications', {
+  receiverId: uuid('receiver_id')
+    .notNull()
+    .references(() => usersSchema.id, { onDelete: 'cascade' }),
+  senderId: uuid('sender_id')
+    .references(() => usersSchema.id, { onDelete: 'set null' }),
+  type: DrizzleNotificationTypeEnum('type').notNull(),
+  productId: uuid('product_id')
+    .references(() => productsSchema.id, { onDelete: 'set null' }),
+  messageId: uuid('message_id')
+    .references(() => messagesSchema.id, { onDelete: 'cascade' }),
+  conversationId: uuid('conversation_id')
+    .references(() => conversationsSchema.id, { onDelete: 'cascade' }),
+  // e.g. { productName, productImageUrl, senderName, messagePreview, rejectionReason }
+  metadata: jsonb('metadata'),
+  priority: DrizzlePriorityEnum('priority').default(PriorityType.MEDIUM).notNull(),
+  readAt: timestamp('read_at', { withTimezone: true }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+  ...baseSchema,
+}, (table) => [
+  index('notifications_receiver_unread_idx')
+    .on(table.receiverId, table.readAt, table.createdAt),
+  index('notifications_expires_idx').on(table.expiresAt),
+  index('notifications_product_idx').on(table.productId),
+]);
+
 
 export const shopProfilesSchema = pgTable('shop_profiles', {
-  userId: uuid('user_id').notNull().references(() => usersSchema.id, {
-        onDelete: 'cascade',
-    }),
+  userId: uuid('user_id').notNull()
+    .references(() => usersSchema.id, { onDelete: 'cascade' }),
   shopName: varchar('shop_name', { length: 255 }).notNull(),
   description: text('description'),
   taxIdNumber: varchar('tax_id_number', { length: 255 }),
@@ -141,48 +211,75 @@ export const shopProfilesSchema = pgTable('shop_profiles', {
   phone: varchar('phone', { length: 50 }).notNull(),
   bannerUrl: varchar('banner_url', { length: 255 }),
   profileUrl: varchar('profile_url', { length: 255 }),
-  isOnline: boolean('is_online').default(false).notNull(),
   facebookLink: varchar('facebook_link', { length: 255 }),
   telegramLink: varchar('telegram_link', { length: 255 }),
   instagramLink: varchar('instagram_link', { length: 255 }),
   website: varchar('website', { length: 255 }),
   verified: boolean('verified').default(false).notNull(),
-  rating: doublePrecision('rating').default(0.0).notNull(),
-  subscribers: integer('subscribers').default(0).notNull(),
-  totalReviews: integer('total_reviews').default(0).notNull(),
-  views: integer('views').default(0).notNull(),
   latitude: doublePrecision('latitude'),
   longitude: doublePrecision('longitude'),
-  ...baseSchema
-});
+  ...baseSchema,
+}, (table) => [
+  index('shop_profiles_user_idx').on(table.userId),
+  index('shop_profiles_verified_idx').on(table.verified),
+]);
 
-export const shopSubscriptionsSchema = pgTable('shop_subscriptions', {
-  userId: uuid('user_id').notNull().references(() => usersSchema.id, {
-        onDelete: 'cascade',
-    }),
-  shopId: uuid('shop_id')
-    .notNull()
+export const shopMembersSchema = pgTable('shop_members', {
+  shopId: uuid('shop_id').notNull()
     .references(() => shopProfilesSchema.id, { onDelete: 'cascade' }),
-  ...baseSchema
-});
+  userId: uuid('user_id').notNull()
+    .references(() => usersSchema.id, { onDelete: 'cascade' }),
+  role:DrizzleShopMemberRoleEnum('role').notNull(),
+  invitedBy: uuid('invited_by').references(() => usersSchema.id, { onDelete: 'set null' }),
+  joinedAt: timestamp('joined_at', { withTimezone: true }).defaultNow().notNull(),
+  ...baseSchema,
+}, (table) => [
+  uniqueIndex('shop_members_unique').on(table.shopId, table.userId),
+  index('shop_members_user_idx').on(table.userId),
+  index('shop_members_shop_idx').on(table.shopId),
+]);
 
-export const shopRatingsSchema = pgTable(
-  "shop_ratings",
-  {
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => usersSchema.id, { onDelete: "cascade" }),
-    shopProfileId: uuid("shop_profile_id")
-      .notNull()
-      .references(() => shopProfilesSchema.id, { onDelete: "cascade" }),
-    rating: integer("rating")
-      .notNull(),
-    ...baseSchema,
-  },
-  (table) => [
-    uniqueIndex("unique_user_shop_rating").on(table.userId, table.shopProfileId),
-  ]
-);
+export const followsSchema = pgTable('follows', {
+  followerId: uuid('follower_id').notNull()
+    .references(() => usersSchema.id, { onDelete: 'cascade' }),
+  followingUserId: uuid('following_user_id')
+    .references(() => usersSchema.id, { onDelete: 'cascade' }),
+  followingShopId: uuid('following_shop_id')
+    .references(() => shopProfilesSchema.id, { onDelete: 'cascade' }),
+  ...baseSchema,
+}, (table) => [
+  uniqueIndex('follows_user_unique')
+    .on(table.followerId, table.followingUserId)
+    .where(sql`${table.followingUserId} IS NOT NULL`),
+  uniqueIndex('follows_shop_unique')
+    .on(table.followerId, table.followingShopId)
+    .where(sql`${table.followingShopId} IS NOT NULL`),
+
+  index('follows_following_user_idx').on(table.followingUserId),
+  index('follows_following_shop_idx').on(table.followingShopId),
+  index('follows_follower_idx').on(table.followerId),
+
+  check('follows_exactly_one_target', sql`
+    (${table.followingUserId} IS NULL) <> (${table.followingShopId} IS NULL)
+  `),
+  check('follows_not_self_user', sql`
+    ${table.followingUserId} IS NULL OR ${table.followerId} <> ${table.followingUserId}
+  `),
+]);
+
+export const shopRatingsSchema = pgTable('shop_ratings', {
+  userId: uuid('user_id').notNull()
+    .references(() => usersSchema.id, { onDelete: 'cascade' }),
+  shopProfileId: uuid('shop_profile_id').notNull()
+    .references(() => shopProfilesSchema.id, { onDelete: 'cascade' }),
+  rating: integer('rating').notNull(),
+  comment: text('comment'),
+  ...baseSchema,
+}, (table) => [
+  uniqueIndex('unique_user_shop_rating').on(table.userId, table.shopProfileId),
+  index('shop_ratings_shop_idx').on(table.shopProfileId),
+  check('shop_ratings_rating_range', sql`${table.rating} BETWEEN 1 AND 5`),
+]);
 
 export const regionsSchema = pgTable('regions', {
     name: text('name').notNull(),
@@ -249,6 +346,7 @@ export const productsSchema = pgTable('products', {
     index('products_user_idx').on(table.userId),
     index('products_price_idx').on(table.price),
     index('products_urgent_idx').on(table.isUrgent),
+    index('products_shop_idx').on(table.shopId),
 ]
 )
 
@@ -257,7 +355,9 @@ export const productImagesSchema = pgTable('product_images', {
     imageUrl: varchar("image_url", { length: 255 }).notNull(),
     isMain: boolean('is_main').notNull().default(false),
     ...baseSchema
-})
+}, (table) => [
+  index('product_images_product_idx').on(table.productId),
+]);
 
 export const attributesSchema = pgTable(
   'attributes',
@@ -357,7 +457,11 @@ export const favoriteProductsSchema = pgTable('favorites', {
     userId: uuid('user_id').notNull().references(() => usersSchema.id, {onDelete: 'cascade'}),
     productId: uuid('product_id').notNull().references(() => productsSchema.id, {onDelete: 'cascade'}),
     ...baseSchema
-})
+}, (table) => [
+  uniqueIndex('favorites_unique').on(table.userId, table.productId),
+  index('favorites_user_idx').on(table.userId),
+  index('favorites_product_idx').on(table.productId),
+]);
 
 export const tempCredentialsSchema = pgTable("temp_credentials", {
   email: varchar("email", { length: 255 }).notNull().unique(),
@@ -374,22 +478,43 @@ export const usersRelations = relations(usersSchema, ({ one, many }) => ({
     references: [profilesSchema.userId],
     relationName: "user_profile",
   }),
-  shopProfile: one(shopProfilesSchema, {
-    fields: [usersSchema.id],
-    references: [shopProfilesSchema.userId],
-    relationName: "user_shopprofile"
+
+  shopProfiles: many(shopProfilesSchema, {
+  relationName: "user_shopprofile",
+}),
+
+  following: many(followsSchema, {
+    relationName: "user_following",
   }),
+
+  followers: many(followsSchema, {
+    relationName: "user_followers",
+  }),
+
+  shopMemberships: many(shopMembersSchema, {
+    relationName: "user_shop_memberships",
+  }),
+
+  shopInvitations: many(shopMembersSchema, {
+    relationName: "user_shop_invitations",
+  }),
+
   favorites: many(favoriteProductsSchema, {
     relationName: "user_favorites",
   }),
   products: many(productsSchema, {
     relationName: "user_products",
   }),
-    subscriptions: many(shopSubscriptionsSchema, {
-    relationName: "user_subscriptions",
-  }),
   sentMessages: many(messagesSchema, {
     relationName: "message_sender",
+  }),
+
+  conversationParticipations: many(conversationParticipantsSchema, {
+    relationName: "user_conversation_participations",
+  }),
+
+  createdConversations: many(conversationsSchema, {
+    relationName: "conversation_creator",
   }),
 
   receivedNotifications: many(notificationsSchema, {
@@ -415,7 +540,7 @@ export const profilesRelations = relations(profilesSchema, ({ one }) => ({
     references: [regionsSchema.id],
     relationName: "region_profiles",
   }),
- 
+
 }));
 
 export const shopProfileRelations = relations(shopProfilesSchema, ({one, many}) => ({
@@ -424,24 +549,53 @@ export const shopProfileRelations = relations(shopProfilesSchema, ({one, many}) 
     references: [usersSchema.id],
     relationName: "user_shopprofile"
   }),
-  subscriptions: many(shopSubscriptionsSchema, {
-    relationName: "shop_subscriptions",
+
+  members: many(shopMembersSchema, {
+      relationName: "shop_members",
   }),
-    ratings: many(shopRatingsSchema, {
+
+  ratings: many(shopRatingsSchema, {
       relationName: "shop_profile_ratings",
     }),
+
+  followers: many(followsSchema, {
+    relationName: "shop_followers",
+  }),
 }))
 
-export const shopSubscriptionsRelations = relations(shopSubscriptionsSchema, ({ one }) => ({
-  user: one(usersSchema, {
-    fields: [shopSubscriptionsSchema.userId],
-    references: [usersSchema.id],
-    relationName: "user_subscriptions",
-  }),
-  shop: one(shopProfilesSchema, {
-    fields: [shopSubscriptionsSchema.shopId],
+export const shopMembersRelations = relations(shopMembersSchema, ({ one }) => ({
+  shopProfile: one(shopProfilesSchema, {
+    fields: [shopMembersSchema.shopId],
     references: [shopProfilesSchema.id],
-    relationName: "shop_subscriptions",
+    relationName: "shop_members",
+  }),
+  user: one(usersSchema, {
+    fields: [shopMembersSchema.userId],
+    references: [usersSchema.id],
+    relationName: "user_shop_memberships",
+  }),
+  inviter: one(usersSchema, {
+    fields: [shopMembersSchema.invitedBy],
+    references: [usersSchema.id],
+    relationName: "user_shop_invitations",
+  })
+}))
+
+export const followsRelations = relations(followsSchema, ({ one }) => ({
+  follower: one(usersSchema, {
+    fields: [followsSchema.followerId],
+    references: [usersSchema.id],
+    relationName: "user_following",
+  }),
+  followingUser: one(usersSchema, {
+    fields: [followsSchema.followingUserId],
+    references: [usersSchema.id],
+    relationName: "user_followers",
+  }),
+  followingShop: one(shopProfilesSchema, {
+    fields: [followsSchema.followingShopId],
+    references: [shopProfilesSchema.id],
+    relationName: "shop_followers",
   }),
 }));
 
@@ -462,27 +616,45 @@ export const shopRatingsRelations = relations(
 );
 
 export const conversationsRelations = relations(conversationsSchema, ({one, many}) => ({
-  userOne: one(usersSchema, {
-    fields: [conversationsSchema.userOneId],
+  creator: one(usersSchema, {
+    fields: [conversationsSchema.createdBy],
     references: [usersSchema.id],
-    relationName: "conversation_user_one",
+    relationName: "conversation_creator",
   }),
-  userTwo: one(usersSchema, {
-    fields: [conversationsSchema.userTwoId],
-    references: [usersSchema.id],
-    relationName: "conversation_user_two",
+  participants: many(conversationParticipantsSchema, {
+    relationName: "conversation_participants",
   }),
-  messages: many(messagesSchema)
+  messages: many(messagesSchema, {
+    relationName: "conversation_messages",
+  }),
 }))
+
+export const conversationParticipantsRelations = relations(
+  conversationParticipantsSchema,
+  ({ one }) => ({
+    conversation: one(conversationsSchema, {
+      fields: [conversationParticipantsSchema.conversationId],
+      references: [conversationsSchema.id],
+      relationName: "conversation_participants",
+    }),
+    user: one(usersSchema, {
+      fields: [conversationParticipantsSchema.userId],
+      references: [usersSchema.id],
+      relationName: "user_conversation_participations",
+    }),
+  })
+);
 
 export const messagesRelations = relations(messagesSchema, ({ one }) => ({
   conversation: one(conversationsSchema, {
     fields: [messagesSchema.conversationId],
     references: [conversationsSchema.id],
+    relationName: "conversation_messages",
   }),
   sender: one(usersSchema, {
     fields: [messagesSchema.senderId],
     references: [usersSchema.id],
+    relationName: "message_sender",
   }),
 }));
 
@@ -496,6 +668,21 @@ export const notificationsRelations = relations(notificationsSchema, ({ one }) =
     fields: [notificationsSchema.senderId],
     references: [usersSchema.id],
     relationName: "notification_sender",
+  }),
+  product: one(productsSchema, {
+    fields: [notificationsSchema.productId],
+    references: [productsSchema.id],
+    relationName: "notification_product",
+  }),
+  message: one(messagesSchema, {
+    fields: [notificationsSchema.messageId],
+    references: [messagesSchema.id],
+    relationName: "notification_message",
+  }),
+  conversation: one(conversationsSchema, {
+    fields: [notificationsSchema.conversationId],
+    references: [conversationsSchema.id],
+    relationName: "notification_conversation",
   }),
 }));
 

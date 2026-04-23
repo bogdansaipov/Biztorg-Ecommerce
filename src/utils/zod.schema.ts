@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod/dto';
 import * as z from 'zod'
 
 const enum UserRoleEnum {
@@ -20,6 +21,38 @@ const enum PriorityType {
   LOW = 'LOW',
   MEDIUM = 'MEDIUM',
   HIGH = 'HIGH',
+}
+
+export const enum ConversationTypeEnum {
+  DIRECT = 'DIRECT',
+  GROUP = 'GROUP',
+  PUBLIC = 'PUBLIC',
+}
+
+export const enum ParticipantRoleEnum {
+  OWNER = 'OWNER',
+  ADMIN = 'ADMIN',
+  MEMBER = 'MEMBER', 
+}
+
+export const enum MessageTypeEnum {
+  TEXT = 'TEXT',
+  IMAGE = 'IMAGE',
+  SYSTEM = 'SYSTEM',
+}
+
+export const enum NotificationTypeEnum {
+  NEW_MESSAGE = 'NEW_MESSAGE',
+  NEW_PRODUCT_POSTED = 'NEW_PRODUCT_POSTED', // new product posted from shop owner subscribed to
+  NEW_FOLLOWER = 'NEW_FOLLOWER',
+  PRODUCT_APPROVED = 'PRODUCT_APPROVED',
+  PRODUCT_REJECTED = 'PRODUCT_REJECTED',
+}
+
+export const enum ShopMemberRoleEnum {
+  OWNER = 'OWNER',
+  ADMIN = 'ADMIN',
+  EDITOR = 'EDITOR', 
 }
 
 //base schema
@@ -58,11 +91,16 @@ const UserSchema = z
 type UserSchemaType = z.infer<typeof UserSchema>
 
 const MessageSchema = z.object({
-  conversationId: z.uuid().describe('Users conversation id'),
-  senderId: z.uuid().describe('User sender id'),
-  message: z.string().nullable().optional().describe('Text based chat message'),
-  imageUrl: z.string().nullable().optional().describe('Chat image url'),
-  readAt: z.iso.datetime().nullable().optional().describe("Time the message was read"),
+  conversationId: z.uuid().describe('Conversation ID'),
+  senderId: z.uuid().nullable().optional().describe('Sender ID (null if user deleted)'),
+  type: z
+    .enum([MessageTypeEnum.TEXT, MessageTypeEnum.IMAGE, MessageTypeEnum.SYSTEM])
+    .default(MessageTypeEnum.TEXT)
+    .describe('Message type'),
+  content: z.string().nullable().optional().describe('Text content of the message'),
+  imageUrl: z.string().nullable().optional().describe('Image URL if message is an image'),
+  replyToMessageId: z.uuid().nullable().optional().describe('ID of the message being replied to'),
+  editedAt: z.iso.datetime().nullable().optional().describe('When the message was last edited'),
 }).extend(BaseSchemaForSwagger.shape);
 
 type MessageSchemaType = z.infer<typeof MessageSchema>;
@@ -77,77 +115,128 @@ const ProfileSchema = z.object({
 
 type ProfileSchemaType = z.infer<typeof ProfileSchema>
 
-const ShopProfileSchema = z
-  .object({
-    userId: z.uuid().describe('User id'),
-    shopName: z.string().describe('Name of the shop'),
-    description: z.string().nullable().optional().describe('Shop description'),
-    taxIdNumber: z.string().nullable().optional().describe('Tax ID number'),
-    contactName: z.string().nullable().optional().describe('Contact person name'),
-    address: z.string().nullable().optional().describe('Shop address'),
-    phone: z.string().describe('Phone number'),
-    bannerUrl: z.string().nullable().optional().describe('Banner image URL'),
-    profileUrl: z.string().nullable().optional().describe('Profile image URL'),
-    isOnline: z.boolean().default(false).describe('Whether the shop is online'),
-    facebookLink: z.string().nullable().optional().describe('Facebook link'),
-    telegramLink: z.string().nullable().optional().describe('Telegram link'),
-    instagramLink: z.string().nullable().optional().describe('Instagram link'),
-    website: z.string().nullable().optional().describe('Website link'),
-    verified: z.boolean().default(false).describe('Whether the shop is verified'),
-    rating: z.number().default(0).describe('Average rating of the shop'),
-    subscribers: z.number().int().default(0).describe('Number of subscribers'),
-    totalReviews: z.number().int().default(0).describe('Number of total reviews'),
-    views: z.number().int().default(0).describe('Number of profile views'),
-    latitude: z.number().nullable().optional().describe('Latitude'),
-    longitude: z.number().nullable().optional().describe('Longitude'),
-  })
-  .extend(BaseSchemaForSwagger.shape);
+const ShopProfileSchema = z.object({
+  userId: z.uuid().describe('Owner user ID'),
+  shopName: z.string().describe('Name of the shop'),
+  description: z.string().nullable().optional().describe('Shop description'),
+  taxIdNumber: z.string().nullable().optional().describe('Tax ID number'),
+  contactName: z.string().nullable().optional().describe('Contact person name'),
+  address: z.string().nullable().optional().describe('Shop address'),
+  phone: z.string().describe('Phone number'),
+  bannerUrl: z.string().nullable().optional().describe('Banner image URL'),
+  profileUrl: z.string().nullable().optional().describe('Profile image URL'),
+  facebookLink: z.string().nullable().optional().describe('Facebook link'),
+  telegramLink: z.string().nullable().optional().describe('Telegram link'),
+  instagramLink: z.string().nullable().optional().describe('Instagram link'),
+  website: z.string().nullable().optional().describe('Website link'),
+  verified: z.boolean().default(false).describe('Whether the shop is verified'),
+  latitude: z.number().nullable().optional().describe('Latitude'),
+  longitude: z.number().nullable().optional().describe('Longitude'),
+}).extend(BaseSchemaForSwagger.shape);
 
 type ShopProfileSchemaType = z.infer<typeof ShopProfileSchema>;
 
-export const NotificationSchema = z
-  .object({
-    receiverId: z.uuid().nullable().optional().describe('User ID who receives the notification'),
-    senderId: z.uuid().nullable().optional().describe('User ID who sent the notification'),
-    type: z.string().describe('Type of the notification (e.g., message, alert, system)'),
-    content: z.string().describe('Main content or message of the notification'),
-    hasBeenSeen: z.boolean().default(false).describe('Whether the notification has been seen'),
-    isGlobal: z.boolean().default(false).describe('Whether this is a global notification visible to all users'),
-    referenceId: z.string().nullable().optional().describe('Reference ID related to another entity (e.g., post, order, etc.)'),
-    priority: z
-      .enum([PriorityType.HIGH, PriorityType.MEDIUM, PriorityType.LOW])
-      .default(PriorityType.MEDIUM)
-      .describe('Priority of the notification'),
-    expiresAt: z.iso.datetime().nullable().optional().describe('When this notification expires'),
-    metadata: z
-      .record(z.string(), z.any())
-      .nullable()
-      .optional()
-      .describe('Additional metadata stored as JSONB'),
-    date: z.iso.datetime().nullable().optional().describe('Creation date of the notification'),
-  })
-  .extend(BaseSchemaForSwagger.shape);
+// For endpoints that return shop + computed stats
+export const ShopProfileWithStatsSchema = ShopProfileSchema.extend({
+  rating: z.number().default(0).describe('Average rating (computed)'),
+  totalReviews: z.number().int().default(0).describe('Number of reviews (computed)'),
+  subscribers: z.number().int().default(0).describe('Number of subscribers (computed)'),
+});
+
+export type ShopProfileWithStatsSchemaType = z.infer<typeof ShopProfileWithStatsSchema>;
+
+export const NotificationSchema = z.object({
+  receiverId: z.uuid().describe('User ID who receives the notification'),
+  senderId: z.uuid().nullable().optional().describe('User ID who triggered the notification'),
+  type: z
+    .enum([
+      NotificationTypeEnum.NEW_MESSAGE,
+      NotificationTypeEnum.NEW_PRODUCT_POSTED,
+      NotificationTypeEnum.NEW_FOLLOWER,
+      NotificationTypeEnum.PRODUCT_APPROVED,
+      NotificationTypeEnum.PRODUCT_REJECTED,
+    ])
+    .describe('Type of the notification'),
+  productId: z.uuid().nullable().optional().describe('Related product ID'),
+  messageId: z.uuid().nullable().optional().describe('Related message ID'),
+  conversationId: z.uuid().nullable().optional().describe('Related conversation ID'),
+  metadata: z
+    .record(z.string(), z.any())
+    .nullable()
+    .optional()
+    .describe('Snapshot data for rendering (e.g. productName, senderName)'),
+  priority: z
+    .enum([PriorityType.HIGH, PriorityType.MEDIUM, PriorityType.LOW])
+    .default(PriorityType.MEDIUM)
+    .describe('Priority level'),
+  readAt: z.iso.datetime().nullable().optional().describe('When the notification was read (null = unread)'),
+  expiresAt: z.iso.datetime().nullable().optional().describe('When this notification expires'),
+}).extend(BaseSchemaForSwagger.shape);
 
 export type NotificationSchemaType = z.infer<typeof NotificationSchema>;
 
-export const ConversationItemSchema = z
-  .object({
-    userOneId: z.uuid().describe('ID of the first user'),
-    userTwoId: z.uuid().describe('ID of the second user'),
-    userOne: UserSchema.describe('User One details'),
-    userTwo: UserSchema.describe('User Two details'),
-    phoneNumber: z.string().describe('Phone number of the other user'),
-    lastMessage: z.string().describe('Last message content'),
-    lastMessageDate: z.string().describe('Formatted date of the last message'),
-    isShop: z.boolean().describe('Whether the other user is a shop'),
-    shopProfile: ShopProfileSchema.nullable().optional().describe('Shop profile if user is a shop'),
-    userProfile: ProfileSchema.nullable().optional().describe('Profile of the other user'),
-    isAlreadySubscriber: z.boolean().describe('Whether the current user has subscribed to the shop'),
-    hasAlreadyRated: z.boolean().describe('Whether the current user has rated the shop'),
-  })
-  .extend(BaseSchemaForSwagger.shape);
+export const ConversationSchema = z.object({
+  type: z.enum([
+    ConversationTypeEnum.DIRECT,
+    ConversationTypeEnum.GROUP,
+    ConversationTypeEnum.PUBLIC,
+  ]).describe('Conversation type'),
+  name: z.string().nullable().optional().describe('Name (group/public only)'),
+  description: z.string().nullable().optional().describe('Description (group/public only)'),
+  imageUrl: z.string().nullable().optional().describe('Avatar image URL'),
+  createdBy: z.uuid().nullable().optional().describe('Creator user ID'),
+  lastMessageAt: z.iso.datetime().nullable().optional().describe('Timestamp of last message'),
+}).extend(BaseSchemaForSwagger.shape);
 
-export type ConversationItemSchemaType = z.infer<typeof ConversationItemSchema>;
+export type ConversationSchemaType = z.infer<typeof ConversationSchema>;
+
+export const ConversationParticipantSchema = z.object({
+  conversationId: z.uuid(),
+  userId: z.uuid(),
+  role: z.enum([
+    ParticipantRoleEnum.OWNER,
+    ParticipantRoleEnum.ADMIN,
+    ParticipantRoleEnum.MEMBER,
+  ]),
+  joinedAt: z.iso.datetime(),
+  leftAt: z.iso.datetime().nullable().optional(),
+  lastReadMessageId: z.uuid().nullable().optional(),
+  isMuted: z.boolean(),
+}).extend(BaseSchemaForSwagger.shape);
+
+// Represents a conversation as displayed in the user's chat list
+export const ConversationListItemSchema = z.object({
+  id: z.uuid(),
+  type: z.enum([
+    ConversationTypeEnum.DIRECT,
+    ConversationTypeEnum.GROUP,
+    ConversationTypeEnum.PUBLIC,
+  ]),
+  name: z.string().nullable().optional().describe('Chat name (group/public) OR other user name (DM)'),
+  imageUrl: z.string().nullable().optional().describe('Chat avatar or other user avatar'),
+  lastMessage: z.object({
+    content: z.string().nullable().optional(),
+    type: z.enum([MessageTypeEnum.TEXT, MessageTypeEnum.IMAGE, MessageTypeEnum.SYSTEM]),
+    createdAt: z.iso.datetime(),
+    senderId: z.uuid().nullable().optional(),
+  }).nullable().optional().describe('Last message in the conversation'),
+  unreadCount: z.number().int().default(0).describe('Number of unread messages'),
+  isMuted: z.boolean().default(false),
+  participantCount: z.number().int().describe('Total number of participants'),
+
+  // DM-specific: details about the other participant
+  otherUser: z.object({
+    id: z.uuid(),
+    name: z.string().nullable().optional(),
+    profile: ProfileSchema.nullable().optional(),
+    shopProfile: ShopProfileSchema.nullable().optional(),
+    isShop: z.boolean(),
+    isSubscribedByMe: z.boolean(),
+    hasRatedByMe: z.boolean(),
+  }).nullable().optional().describe('Other user details (DMs only)'),
+});
+
+export type ConversationListItemSchemaType = z.infer<typeof ConversationListItemSchema>;
 
 const RegionSchema = z.object({
   name: z.string().describe('Region name'),
@@ -303,6 +392,13 @@ const DatabaseErrorSchema = z.object({
 });
 
 type DatabaseErrorSchemaType = z.infer<typeof DatabaseErrorSchema>;
+
+
+export const MessageResponseSchema = z.object({
+  message: z.string().describe('Operation result message'),
+}).describe('Simple message response');
+
+export class MessageResponseDto extends createZodDto(MessageResponseSchema) {}
 
 export {
     BaseSchema,

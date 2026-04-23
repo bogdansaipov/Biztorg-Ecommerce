@@ -8,7 +8,6 @@ import { validateEnv } from 'src/config/env/env-validation';
 import { DrizzleModule } from 'src/database/drizzle.module';
 import { UpdateSocialPostProcessor } from './update-social-post.processor';
 import { DeleteSocialPostProcessor } from './delete-social-post.processor';
-import { SendFcmNotificationProcessor } from './send-fcm.processor';
 import { FirebaseService } from '../firebase/firebase.service';
 import { RedisModule } from '../redis/redis.module';
 
@@ -38,7 +37,6 @@ const env = validateEnv();
     SocialPostProcessor,
     UpdateSocialPostProcessor,
     DeleteSocialPostProcessor,
-    SendFcmNotificationProcessor,
     TelegramService,
     FacebookService,
     InstagramService,

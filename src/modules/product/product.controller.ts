@@ -194,10 +194,9 @@ async filterProducts(
     'UserProductsArrayResponseSchema',
    )
   })
-  async getUserProducts(@Param('userId') userId: string): Promise<UserProductsArrayResponseDto> {
-    return this.productService.getUserProducts(userId);
+  async getUserProducts(@Param('userId') userId: string, @Query() query: AllProductsQueryDto): Promise<UserProductsArrayResponseDto> {
+    return this.productService.getUserProducts(userId, query);
   }
-
 
   @Get('recommendations/:productId')
   @ApiOperation({ summary: 'Get userProducts and relatedProducts' })

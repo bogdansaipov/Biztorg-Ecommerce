@@ -20,13 +20,10 @@ import { ProductModule } from './modules/product/product.module';
 import { RegionModule } from './modules/region/region.module';
 import { FirebaseModule } from './modules/firebase/firebase.module';
 import { ProfileModule } from './modules/profile/profile.module';
-import { ConversationModule } from './modules/conversation/conversation.module';
-import { MessageModule } from './modules/message/message.module';
-import { ShopProfileModule } from './modules/shopProfile/shopProfile.module';
-import { NotificationModule } from './modules/notification/notification.module';
-import { AIModule } from './modules/AI/AI.module';
-import { WebsocketModule } from './modules/websocket/websocket.module';
+import { AIModule } from './modules/AI/AI.module'
 import { RedisModule } from './modules/redis/redis.module';
+import { FollowsModule } from './modules/follows/follows.module';
+import { FavoritesModule } from './modules/favorites/favorites.module';
 
 @Module({
   imports: [ServeStaticModule.forRoot({
@@ -52,8 +49,8 @@ import { RedisModule } from './modules/redis/redis.module';
         adapter: new HandlebarsAdapter(),
         options: { strict: true },
       },
-    }), EnvModule, DrizzleModule, RedisModule, AuthModule, ProfileModule, ShopProfileModule, CategoryModule, ProductModule,
-     RegionModule, ConversationModule, MessageModule, AIModule, NotificationModule, JobsModule, WebsocketModule, FirebaseModule],
+    }), EnvModule, DrizzleModule, RedisModule, AuthModule, ProfileModule, FollowsModule, CategoryModule, ProductModule,
+     RegionModule, AIModule, JobsModule, FirebaseModule, FavoritesModule],
   controllers: [AppController],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },

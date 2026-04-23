@@ -13,7 +13,7 @@ import { JwtService } from '@nestjs/jwt';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { DrizzleAsyncProvider } from 'src/database/drizzle.provider';
 import * as schema from 'src/database/schema';
-import { and, asc, desc, eq, sql, SQLWrapper } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, sql, SQLWrapper } from 'drizzle-orm';
 import { promises as fs } from "fs";
 import { join } from "path";
 import { ilike } from 'drizzle-orm';
@@ -27,43 +27,42 @@ import { UserRoleEnum } from 'src/utils/zod.schema';
 import { RedisService } from '../redis/redis.service';
 import { ConfigService } from '@nestjs/config';
 import { EnvType } from 'src/config/env/env-validation';
+import { InferSelectModel } from 'drizzle-orm';
 
+type Region = InferSelectModel<typeof schema.regionsSchema>;
+type Product = InferSelectModel<typeof schema.productsSchema>;
+type ProductImage = InferSelectModel<typeof schema.productImagesSchema>;
+type ShopProfile = InferSelectModel<typeof schema.shopProfilesSchema>;
+type User = InferSelectModel<typeof schema.usersSchema>;
+type Profile = InferSelectModel<typeof schema.profilesSchema>;
 
-type RegionWithParent = {
-  id: string;
-  name: string;
-  slug: string;
-  parentId: string | null;
-  parent?: {
-    id: string;
-    name: string;
-    slug: string;
-    parentId: string | null;
-  } | null;
-};
+type RegionWithParent = Pick<Region, 'id' | 'name' | 'slug' | 'parentId'> & {
+  parent?: Pick<Region, 'id' | 'name' | 'slug' | 'parentId'> | null;
+}
 
-type ShopProfileWithSubscribers = {
-  id: string;
-  shopName: string;
-  profileUrl: string | null;
+type ShopProfileWithSubscribers = Pick<ShopProfile, 'id' | 'shopName' | 'profileUrl'> & {
   subscriptions: {
-    user: {
-      id: string;
-      profile?: {
-        fcmToken?: string | null;
-      } | null;
+    user: Pick<User, 'id'> & {
+      profile?: Pick<Profile, 'fcmToken'> | null;
     };
   }[];
 };
 
-type ProductWithImages = {
-  id: string;
-  userId: string;
-  images: {
-    id: string;
-    isMain: boolean;
-  }[];
+type ProductWithImages = Pick<Product, 'id' | 'userId'> & {
+  images: Pick<ProductImage, 'id' | 'isMain'>[];
 };
+
+type ProductFromQuery = Product & {
+  region: Pick<Region, 'id' | 'name' | 'slug' | 'parentId'> & {
+    parent?: Region | null;
+  };
+  images: Pick<ProductImage, 'imageUrl' | 'isMain'>[];
+};
+
+function formatRegionName(region?: { name: string; parent?: { name: string } | null } | null): string {
+  if (!region) return 'Не указано';
+  return region.parent ? `${region.parent.name}, ${region.name}` : region.name;
+}
 
 @Injectable()
 export class ProductService {
@@ -90,7 +89,6 @@ async getAllProducts(query: AllProductsQueryDto): Promise<ProductsArrayResponseD
   const cacheKey = `products:all:${page}:${limit}`;
 
   const cached = await this.redisService.get(cacheKey);
-
   if (cached) {
     return JSON.parse(cached);
   }
@@ -114,6 +112,13 @@ async getAllProducts(query: AllProductsQueryDto): Promise<ProductsArrayResponseD
           name: true,
           slug: true,
         },
+        with: {
+          parent: {
+            columns: {
+              name: true,
+          },
+        },
+      },
       },
       images: {
         columns: {
@@ -127,13 +132,20 @@ async getAllProducts(query: AllProductsQueryDto): Promise<ProductsArrayResponseD
     offset: offset,
   });
 
-  const formatted = products.map((product) => ({
+  const formatted = (products as ProductFromQuery[]).map((product) => {
+  const { region } = product;
+  return {
     ...product,
-    region: product.region as { id: string; name: string; slug: string },
+    region: {
+      id: region.id,
+      name: formatRegionName(region),
+      slug: region.slug,
+    },
     createdAt: product.createdAt.toISOString(),
     updatedAt: product.updatedAt.toISOString(),
     deletedAt: product.deletedAt ? product.deletedAt.toISOString() : null,
-  }));
+  };
+});
 
     const response = {
     products: formatted,
@@ -156,7 +168,6 @@ async filterProducts(query: ProductFilterQueryDto): Promise<ProductsFilterRespon
     limit = 20,
     query: search,
     categoryId,
-    parentCategoryId,
     regionId,
     parentRegionId,
     priceFrom,
@@ -164,45 +175,46 @@ async filterProducts(query: ProductFilterQueryDto): Promise<ProductsFilterRespon
     currency,
     attributeValueIds,
     sorting,
+    isUrgent,
+    isFree
   } = query;
 
   const offset = (page - 1) * limit;
-
   const conditions: SQLWrapper[] = [];
-
-  let tsQuery = '';
   let orderBy: any = undefined;
 
-  if (search) {
-    const words = search.split(/\s+/).map(w => w.trim()).filter(Boolean);
-    tsQuery = words.map(w => `${w}:*`).join(' & ');
+  if (search?.trim()) {
+    const normalizedSearch = search.trim();
 
     conditions.push(sql`
       (
-        search_vector @@ to_tsquery('english', ${tsQuery})
-        OR search_vector @@ to_tsquery('russian', ${tsQuery})
-        OR search_vector @@ to_tsquery('simple', ${tsQuery})
-
-        OR similarity(name, ${search}) > 0.1
-        OR similarity(description, ${search}) > 0.1
-
-        OR name ILIKE ${'%' + search + '%'}
-        OR description ILIKE ${'%' + search + '%'}
+        search_vector @@ websearch_to_tsquery('simple', ${normalizedSearch})
+        OR similarity(name, ${normalizedSearch}) > 0.1
+        OR similarity(description, ${normalizedSearch}) > 0.1
+        OR name ILIKE ${'%' + normalizedSearch + '%'}
+        OR description ILIKE ${'%' + normalizedSearch + '%'}
       )
     `);
-
-    orderBy = sql`
-      ts_rank(search_vector, to_tsquery('english', ${tsQuery})) DESC,
-      ts_rank(search_vector, to_tsquery('russian', ${tsQuery})) DESC,
-      similarity(name, ${search}) DESC,
-      similarity(description, ${search}) DESC,
-      ${schema.productsSchema.createdAt} DESC
-    `;
   }
 
-  if (categoryId) {
-    conditions.push(eq(schema.productsSchema.categoryId, categoryId));
-  }
+ if (categoryId) {
+  conditions.push(sql`
+    ${schema.productsSchema.categoryId} IN (
+      WITH RECURSIVE category_tree AS (
+        SELECT id
+        FROM categories
+        WHERE id = ${categoryId}
+
+        UNION ALL
+
+        SELECT c.id
+        FROM categories c
+        INNER JOIN category_tree ct ON c.parent_id = ct.id
+      )
+      SELECT id FROM category_tree
+    )
+  `);
+}
 
   if (regionId) {
     conditions.push(eq(schema.productsSchema.regionId, regionId));
@@ -216,35 +228,50 @@ async filterProducts(query: ProductFilterQueryDto): Promise<ProductsFilterRespon
     `);
   }
 
-  if (priceFrom || priceTo) {
-    const from = priceFrom ?? 0;
-    const to = priceTo ?? 999999999;
+  if (isUrgent !== undefined) {
+  conditions.push(
+    eq(schema.productsSchema.isUrgent, isUrgent),
+  );
+}
 
-    if (currency === 'USD') {
-      conditions.push(sql`
-        (
-          (currency = 'USD' AND price BETWEEN ${from} AND ${to})
-          OR
-          (currency = 'UZS' AND price BETWEEN ${from} * 12750 AND ${to} * 12750)
-        )
-      `);
-    }
+  if (isFree !== undefined) {
+  conditions.push(
+    isFree
+      ? isNull(schema.productsSchema.price)
+      : isNotNull(schema.productsSchema.price)
+  );
+}
 
-    if (currency === 'UZS') {
-      conditions.push(sql`
-        (
-          (currency = 'UZS' AND price BETWEEN ${from} AND ${to})
-          OR
-          (currency = 'USD' AND price BETWEEN ${from} / 12750 AND ${to} / 12750)
-        )
-      `);
-    }
+  if (priceFrom != null || priceTo != null) {
+  const from = priceFrom ?? 0;
+  const to = priceTo ?? 999999999;
+  const effectiveCurrency = currency ?? 'UZS';
+
+  if (effectiveCurrency === 'USD') {
+    conditions.push(sql`
+      (
+        (currency = 'USD' AND price BETWEEN ${from} AND ${to})
+        OR
+        (currency = 'UZS' AND price BETWEEN ${from * 12750} AND ${to * 12750})
+      )
+    `);
   }
+
+  if (effectiveCurrency === 'UZS') {
+    conditions.push(sql`
+      (
+        (currency = 'UZS' AND price BETWEEN ${from} AND ${to})
+        OR
+        (currency = 'USD' AND price BETWEEN ${from / 12750} AND ${to / 12750})
+      )
+    `);
+  }
+}
 
   if (attributeValueIds?.length) {
     conditions.push(sql`
       ${schema.productsSchema.id} IN (
-        SELECT product_id 
+        SELECT product_id
         FROM product_attribute_values
         WHERE attribute_value_id IN (${sql.join(attributeValueIds.map(id => sql`${id}`), sql`, `)})
         GROUP BY product_id
@@ -253,17 +280,36 @@ async filterProducts(query: ProductFilterQueryDto): Promise<ProductsFilterRespon
     `);
   }
 
-  if (!orderBy) {
-    switch (sorting) {
-      case 'CHEAP':
-        orderBy = asc(schema.productsSchema.price);
-        break;
-      case 'EXPENSIVE':
-        orderBy = desc(schema.productsSchema.price);
-        break;
-      default:
-        orderBy = desc(schema.productsSchema.createdAt);
-    }
+  switch (sorting) {
+    case 'NEW':
+      orderBy = desc(schema.productsSchema.createdAt);
+      break;
+
+    case 'CHEAP':
+      orderBy = asc(schema.productsSchema.price);
+      break;
+
+    case 'EXPENSIVE':
+      orderBy = desc(schema.productsSchema.price);
+      break;
+
+    default:
+      if (search?.trim()) {
+        const normalizedSearch = search.trim();
+
+        orderBy = sql`
+          ts_rank(search_vector, websearch_to_tsquery('simple', ${normalizedSearch})) DESC,
+          similarity(name, ${normalizedSearch}) DESC,
+          similarity(description, ${normalizedSearch}) DESC,
+          ${schema.productsSchema.isUrgent} DESC,
+          ${schema.productsSchema.createdAt} DESC
+        `;
+      } else {
+        orderBy = sql`
+          ${schema.productsSchema.isUrgent} DESC,
+          ${schema.productsSchema.createdAt} DESC
+        `;
+      }
   }
 
   const whereClause = conditions.length ? and(...conditions) : undefined;
@@ -311,8 +357,13 @@ async filterProducts(query: ProductFilterQueryDto): Promise<ProductsFilterRespon
   };
 }
 
-async getUserProducts(userId: string): Promise<UserProductsArrayResponseDto> {
-  const cacheKey = `products:userId:${userId}`;
+async getUserProducts(userId: string, query: AllProductsQueryDto): Promise<UserProductsArrayResponseDto> {
+
+  const { limit = 12, page = 1 } = query;
+
+  const offset = (page - 1) * limit;
+
+  const cacheKey = `products:userId:${userId}:limit:${limit}:page:${page}`;
 
   const cached = await this.redisService.get(cacheKey);
   if (cached) {
@@ -321,6 +372,8 @@ async getUserProducts(userId: string): Promise<UserProductsArrayResponseDto> {
 
   const products = await this.db.query.productsSchema.findMany({
     orderBy: [desc(schema.productsSchema.createdAt)],
+    limit: limit,
+    offset: offset,
     where: eq(schema.productsSchema.userId, userId),
     with: {
       region: {
@@ -347,10 +400,9 @@ async getUserProducts(userId: string): Promise<UserProductsArrayResponseDto> {
   const results = products.map((product) => {
     const region = product.region as RegionWithParent;
 
-    const regionName =
-      region?.parent?.name ??
-      region?.name ??
-      'Не указано';
+    const regionName = region?.parent?.name
+  ? `${region.parent.name}, ${region.name}`
+  : region?.name ?? 'Не указано';
 
     return {
       ...product,
@@ -376,6 +428,53 @@ async getUserProducts(userId: string): Promise<UserProductsArrayResponseDto> {
   return results;
 }
 
+async getShopProducts(
+  shopId: string,
+  query: AllProductsQueryDto,
+): Promise<UserProductsArrayResponseDto> {
+
+  const { limit = 12, page = 1 } = query;
+
+  const offset = (page - 1) * limit;
+
+  const cacheKey = `products:shopId:${shopId}:limit:${limit}:page:${page}`;
+
+  const cached = await this.redisService.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  const products = await this.db.query.productsSchema.findMany({
+    orderBy: [desc(schema.productsSchema.createdAt)],
+    where: eq(schema.productsSchema.shopId, shopId),
+    limit: limit,
+    offset: offset,
+    with: {
+      region: {
+        columns: { id: true, name: true, slug: true, parentId: true },
+        with: { parent: true },
+      },
+      images: {
+        columns: { imageUrl: true, isMain: true },
+        orderBy: desc(schema.productImagesSchema.isMain),
+      },
+    },
+  });
+
+  const results = products.map((product) => {
+    const region = product.region as RegionWithParent;
+    const regionName = formatRegionName(region);
+
+    return {
+      ...product,
+      region: { id: region.id, name: regionName, slug: region.slug },
+      createdAt: product.createdAt.toISOString(),
+      updatedAt: product.updatedAt.toISOString(),
+      deletedAt: product.deletedAt ? product.deletedAt.toISOString() : null,
+    };
+  });
+
+  await this.redisService.setWithExpiry(cacheKey, JSON.stringify(results), this.cacheTTL);
+  return results;
+}
 
 async getSingleProduct(
   input: ProductsSingleRequestDto
@@ -725,7 +824,7 @@ async createProduct(
   await this.enqueueSocialPost(result, userId, input.regionId, images).catch((err) => {
   });
 
-  await this.notifyShopSubscribers(userId, result, input, images);
+  // await this.notifyShopSubscribers(userId, result, input, images);
 
   await this.clearProductCache(userId, result.id, slug);
 
@@ -964,77 +1063,77 @@ private async enqueueSocialPost(
   });
 }
 
-private async notifyShopSubscribers(
-  userId: string,
-  product: any,
-  input: any,
-  images: Express.Multer.File[],
-): Promise<void> {
+// private async notifyShopSubscribers(
+//   userId: string,
+//   product: any,
+//   input: any,
+//   images: Express.Multer.File[],
+// ): Promise<void> {
 
-  const user = await this.db.query.usersSchema.findFirst({
-    where: eq(schema.usersSchema.id, userId),
-    with: {
-      shopProfile: {
-        with: {
-          subscriptions: {
-            with: {
-              user: { with: { profile: true } },
-            },
-          },
-        },
-      },
-    },
-  });
+//   const user = await this.db.query.usersSchema.findFirst({
+//     where: eq(schema.usersSchema.id, userId),
+//     with: {
+//       shopProfile: {
+//         with: {
+//           subscriptions: {
+//             with: {
+//               user: { with: { profile: true } },
+//             },
+//           },
+//         },
+//       },
+//     },
+//   });
 
-  if (!user?.shopProfile) {
-    return;
-  }
+//   if (!user?.shopProfile) {
+//     return;
+//   }
 
-  const shop = user.shopProfile as ShopProfileWithSubscribers;
+//   const shop = user.shopProfile as ShopProfileWithSubscribers;
 
-  const subscribers = shop.subscriptions ?? [];
-  if (!subscribers.length) {
-    return;
-  }
+//   const subscribers = shop.subscriptions ?? [];
+//   if (!subscribers.length) {
+//     return;
+//   }
 
-  const productImage = images.length
-    ? `https://biztorg.uz/public/uploads/products/${images[0].filename}`
-    : '';
+//   const productImage = images.length
+//     ? `https://biztorg.uz/public/uploads/products/${images[0].filename}`
+//     : '';
 
-  const notificationTitle = `${shop.shopName} опубликовал новое объявление`;
-  const notificationBody = `${input.name} - ${input.description}`.slice(0, 300);
+//   const notificationTitle = `${shop.shopName} опубликовал новое объявление`;
+//   const notificationBody = `${input.name} - ${input.description}`.slice(0, 300);
 
-  const shopImageMain = shop.profileUrl
-    ? `https://biztorg.uz/public/${shop.profileUrl}`
-    : '';
+//   const shopImageMain = shop.profileUrl
+//     ? `https://biztorg.uz/public/${shop.profileUrl}`
+//     : '';
 
-  for (const sub of subscribers) {
-    const subscriber = sub.user;
+//   for (const sub of subscribers) {
+//     const subscriber = sub.user;
 
-    const fcmToken = subscriber?.profile?.fcmToken;
-    if (!fcmToken) {
-      continue;
-    }
+//     const fcmToken = subscriber?.profile?.fcmToken;
+//     if (!fcmToken) {
+//       continue;
+//     }
 
-    await this.notificationQueue.add(
-      'sendNotification',
-      {
-        productId: product.id,
-        notificationTitle,
-        notificationBody,
-        fcmToken,
-        productImageUrl: productImage,
-        senderId: user.id,
-        shopName: shop.shopName,
-        productName: input.name,
-        productDescription: input.description,
-        subscriberId: subscriber.id,
-        shopImage: shopImageMain,
-      },
-      { delay: 200 },
-    );
-  }
-}
+//     await this.notificationQueue.add(
+//       'sendNotification',
+//       {
+//         productId: product.id,
+//         notificationTitle,
+//         notificationBody,
+//         fcmToken,
+//         productImageUrl: productImage,
+//         senderId: user.id,
+//         shopName: shop.shopName,
+//         productName: input.name,
+//         productDescription: input.description,
+//         subscriberId: subscriber.id,
+//         shopImage: shopImageMain,
+//       },
+//       { delay: 200 },
+//     );
+//   }
+// }
 
   private async clearProductCache(userId: string, productId?: string, slug?: string) {
   await Promise.all([

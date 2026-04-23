@@ -90,7 +90,6 @@ export const UserProductsArrayResponseSchema = z
   .array(ProductWithRelationsSchema)
   .describe('Array of products');
 
-
 const ProductsSingleRequestSchema = z
   .object({
     productId: z.uuid().optional(),
@@ -143,8 +142,15 @@ export const ProductFilterQuerySchema = PaginationQuerySchema.extend({
   parentCategoryId: z.uuid().optional(),
   regionId: z.uuid().optional(),
   parentRegionId: z.uuid().optional(),
-  priceFrom: z.number().optional(),
-  priceTo: z.number().optional(),
+  priceFrom: z.preprocess(
+    (v) => (v === '' || v == null ? undefined : Number(v)),
+    z.number().optional()
+  ),
+
+  priceTo: z.preprocess(
+    (v) => (v === '' || v == null ? undefined : Number(v)),
+    z.number().optional()
+  ),
   currency: z.enum([CurrencyEnum.USD, CurrencyEnum.UZS]).optional(),
 
   attributeValueIds: z
@@ -153,7 +159,26 @@ export const ProductFilterQuerySchema = PaginationQuerySchema.extend({
     .transform((v) => (Array.isArray(v) ? v : v?.split(','))),
 
   sorting: z.enum(['NEW', 'CHEAP', 'EXPENSIVE']).optional(),
-});
+  isUrgent: z.preprocess(
+  (v) => {
+    if (v === '' || v == null) return undefined;
+    if (v === 'true' || v === true) return true;
+    if (v === 'false' || v === false) return false;
+    return v;
+  },
+  z.boolean().optional()
+),
+
+isFree: z.preprocess(
+  (v) => {
+    if (v === '' || v == null) return undefined;
+    if (v === 'true' || v === true) return true;
+    if (v === 'false' || v === false) return false;
+    return v;
+  },
+  z.boolean().optional()
+),
+}).describe('Product filter query parameters with pagination');
 
 export class ProductFilterQueryDto extends createZodDto(ProductFilterQuerySchema) {}
 
@@ -192,5 +217,5 @@ export {
     ProductUpdateRequestSchema,
     ProductUpdateRequestDto,
     AllProductsQuerySchema,
-    AllProductsQueryDto
+    AllProductsQueryDto,
 }
